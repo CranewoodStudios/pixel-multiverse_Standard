@@ -49,13 +49,14 @@ machine.
    - Copies configuration files (e.g., `pixel-multiverse.yml`).
    - Installs the systemd service and starts it.
 
-3. Verify the service is running:
-
+4. Configure the yml for the device, or 
+   Copy the 99-picoled.rules to /etc/udev/rules, and save the overlay.
+   
    ```bash
-   batocera status pixel_multiverse
+   batocera-save-overlay
    ```
 
-4. Configure the yml for the device, or copy the 99-picoled.rules to /etc/udev/rules, and save the overlay.
+5. Restart batocera
 
 ---
 

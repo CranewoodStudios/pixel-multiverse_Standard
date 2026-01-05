@@ -212,9 +212,13 @@ def _pattern_linear(direction, color_on=(0,0,255,40), color_off=(0,0,0,0), delay
     Generate frames for linear patterns.
     
     :param direction: 'left_to_right', 'right_to_left', 'top_to_bottom', 'bottom_to_top'
-    :param color_on: Color tuple (b,g,r,br) for activated LEDs
+    :param color_on: Color tuple (b,g,r,br) for activated LEDs (default: blue)
     :param color_off: Color tuple (b,g,r,br) for deactivated LEDs
     :param delay: Delay between steps in seconds
+    
+    Note: time.sleep() is used intentionally within this generator to control
+    animation timing. This is called from idle_attract() which runs in the main
+    event loop and is designed to yield control at regular intervals.
     """
     if not _coord_map:
         return  # No coordinate mapping available
@@ -264,12 +268,12 @@ def _pattern_linear(direction, color_on=(0,0,255,40), color_off=(0,0,0,0), delay
             yield cols
             time.sleep(delay)
 
-def _pattern_radial(direction, color_on=(255,255,0,40), color_off=(0,0,0,0), delay=0.05):
+def _pattern_radial(direction, color_on=(0,0,255,40), color_off=(0,0,0,0), delay=0.05):
     """
     Generate frames for radial patterns (clockwise/anticlockwise).
     
     :param direction: 'clockwise' or 'anticlockwise'
-    :param color_on: Color tuple (b,g,r,br) for activated LEDs
+    :param color_on: Color tuple (b,g,r,br) for activated LEDs (default: blue)
     :param color_off: Color tuple (b,g,r,br) for deactivated LEDs
     :param delay: Delay between steps in seconds
     """
@@ -312,12 +316,12 @@ def _pattern_radial(direction, color_on=(255,255,0,40), color_off=(0,0,0,0), del
         yield cols
         time.sleep(delay)
 
-def _pattern_circular(direction, color_on=(128,128,255,40), color_off=(0,0,0,0), delay=0.05):
+def _pattern_circular(direction, color_on=(0,0,255,40), color_off=(0,0,0,0), delay=0.05):
     """
     Generate frames for circular patterns (outward/inward).
     
     :param direction: 'outward' or 'inward'
-    :param color_on: Color tuple (b,g,r,br) for activated LEDs
+    :param color_on: Color tuple (b,g,r,br) for activated LEDs (default: blue)
     :param color_off: Color tuple (b,g,r,br) for deactivated LEDs
     :param delay: Delay between steps in seconds
     """
@@ -364,6 +368,9 @@ def _pattern_circular(direction, color_on=(128,128,255,40), color_off=(0,0,0,0),
             time.sleep(delay)
         if led_idx < NUM_LEDS:
             cols[led_idx] = color_on
+    
+    # Yield final frame with all LEDs activated
+    yield cols
 
 # ---------- event animations ----------
 def anim_menu_pulse(ser, accent=None, seconds=2.0):
@@ -429,11 +436,8 @@ def idle_attract(mode="breath"):
             
             if pattern_func:
                 # Generate frames from this pattern
-                try:
-                    for cols in pattern_func(**params):
-                        yield cols
-                except (StopIteration, GeneratorExit):
-                    pass
+                for cols in pattern_func(**params):
+                    yield cols
             
             # Move to next pattern
             pattern_idx = (pattern_idx + 1) % len(_pattern_queue)

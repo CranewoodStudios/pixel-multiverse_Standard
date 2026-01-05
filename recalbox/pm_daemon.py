@@ -5,6 +5,13 @@
 
 import os, sys, time, json, math, signal, select
 
+# Try to import yaml for button configuration
+try:
+    import yaml
+    YAML_AVAILABLE = True
+except ImportError:
+    YAML_AVAILABLE = False
+
 # ---------- CONFIG ----------
 NUM_LEDS = 7
 ORDER = list(range(NUM_LEDS))      # change if your physical order differs
@@ -12,6 +19,7 @@ BRIGHT_LIMIT = 170                 # cap brightness (0..255)
 FPS = 60
 FIFO_PATH = "/tmp/pm.fifo"
 SYSTEMS_JSON = "/recalbox/share/pixel-multiverse/systems.json"
+BUTTONS_YAML = "/recalbox/share/pixel-multiverse/buttons.yml"
 ES_STATE = "/tmp/es_state.inf"
 HEADER = b"multiverse:data"
 # --------------------------------
@@ -64,6 +72,10 @@ def read_es_state(path=ES_STATE):
 
 # ---------- systems.json ----------
 _cfg = {}
+_buttons_cfg = {}
+_coord_map = {}
+_pattern_queue = []
+
 def load_config():
     global _cfg
     try:
@@ -73,6 +85,44 @@ def load_config():
     except Exception as e:
         log("systems.json not loaded:", e)
         _cfg = {}
+
+def load_buttons_config():
+    """Load button configuration from YAML file."""
+    global _buttons_cfg, _coord_map, _pattern_queue, NUM_LEDS
+    if not YAML_AVAILABLE:
+        log("yaml not available, skipping buttons config")
+        return
+    try:
+        with open(BUTTONS_YAML, "r") as f:
+            _buttons_cfg = yaml.safe_load(f)
+        btn_cfg = _buttons_cfg.get("buttons", {})
+        
+        # Update NUM_LEDS from config if specified
+        if btn_cfg.get("enabled") and btn_cfg.get("num_leds"):
+            NUM_LEDS = btn_cfg["num_leds"]
+        
+        # Parse led_map to create coord_map
+        led_map = btn_cfg.get("led_map", [])
+        _coord_map = {}
+        for item in led_map:
+            coord = tuple(item.get("coord", []))
+            value = item.get("value")
+            if coord and value is not None:
+                _coord_map[coord] = value
+        
+        # Parse attract_program to create pattern_queue
+        _pattern_queue = []
+        for pattern_cfg in btn_cfg.get("attract_program", []):
+            pattern = pattern_cfg.get("pattern")
+            params = pattern_cfg.get("params", {})
+            if pattern and params:
+                _pattern_queue.append((pattern, params))
+        
+        log("loaded buttons.yml:", f"{len(_coord_map)} LEDs mapped, {len(_pattern_queue)} patterns")
+    except FileNotFoundError:
+        log("buttons.yml not found at", BUTTONS_YAML)
+    except Exception as e:
+        log("buttons.yml not loaded:", e)
 
 def get_system_key(evt):
     sysid = (evt.get("system") or "").lower()
@@ -156,6 +206,172 @@ def default_menu_color():
 def default_attract_mode():
     d=_cfg.get("defaults",{}); return (d.get("attract") or "breath").lower()
 
+# ---------- pattern generation functions ----------
+def _pattern_linear(direction, color_on=(0,0,255,40), color_off=(0,0,0,0), delay=0.05):
+    """
+    Generate frames for linear patterns.
+    
+    :param direction: 'left_to_right', 'right_to_left', 'top_to_bottom', 'bottom_to_top'
+    :param color_on: Color tuple (b,g,r,br) for activated LEDs (default: blue)
+    :param color_off: Color tuple (b,g,r,br) for deactivated LEDs
+    :param delay: Delay between steps in seconds
+    
+    Note: time.sleep() is used intentionally within this generator to control
+    animation timing. This is called from idle_attract() which runs in the main
+    event loop and is designed to yield control at regular intervals.
+    """
+    if not _coord_map:
+        return  # No coordinate mapping available
+    
+    # Extract x and y values from coordinates
+    x_values = sorted(set(coord[0] for coord in _coord_map.keys()))
+    y_values = sorted(set(coord[1] for coord in _coord_map.keys()))
+    
+    if not x_values or not y_values:
+        return
+    
+    min_x, max_x = min(x_values), max(x_values)
+    min_y, max_y = min(y_values), max(y_values)
+    
+    # Initialize all LEDs to off color
+    cols = [color_off] * NUM_LEDS
+    yield cols
+    time.sleep(delay)
+    
+    # Determine iteration order based on direction
+    if direction == 'left_to_right':
+        for x in range(min_x, max_x + 1):
+            for coord, led_idx in _coord_map.items():
+                if coord[0] == x and led_idx < NUM_LEDS:
+                    cols[led_idx] = color_on
+            yield cols
+            time.sleep(delay)
+    elif direction == 'right_to_left':
+        for x in range(max_x, min_x - 1, -1):
+            for coord, led_idx in _coord_map.items():
+                if coord[0] == x and led_idx < NUM_LEDS:
+                    cols[led_idx] = color_on
+            yield cols
+            time.sleep(delay)
+    elif direction == 'top_to_bottom':
+        for y in range(min_y, max_y + 1):
+            for coord, led_idx in _coord_map.items():
+                if coord[1] == y and led_idx < NUM_LEDS:
+                    cols[led_idx] = color_on
+            yield cols
+            time.sleep(delay)
+    elif direction == 'bottom_to_top':
+        for y in range(max_y, min_y - 1, -1):
+            for coord, led_idx in _coord_map.items():
+                if coord[1] == y and led_idx < NUM_LEDS:
+                    cols[led_idx] = color_on
+            yield cols
+            time.sleep(delay)
+
+def _pattern_radial(direction, color_on=(0,0,255,40), color_off=(0,0,0,0), delay=0.05):
+    """
+    Generate frames for radial patterns (clockwise/anticlockwise).
+    
+    :param direction: 'clockwise' or 'anticlockwise'
+    :param color_on: Color tuple (b,g,r,br) for activated LEDs (default: blue)
+    :param color_off: Color tuple (b,g,r,br) for deactivated LEDs
+    :param delay: Delay between steps in seconds
+    """
+    if not _coord_map:
+        return
+    
+    # Calculate center of the playfield
+    x_values = [coord[0] for coord in _coord_map.keys()]
+    y_values = [coord[1] for coord in _coord_map.keys()]
+    
+    if not x_values or not y_values:
+        return
+    
+    center_x = (min(x_values) + max(x_values)) / 2.0
+    center_y = (min(y_values) + max(y_values)) / 2.0
+    
+    # Calculate angles for all coordinates
+    coord_angles = []
+    for coord, led_idx in _coord_map.items():
+        dx = coord[0] - center_x
+        dy = coord[1] - center_y
+        angle = math.atan2(dy, dx)
+        coord_angles.append((angle, coord, led_idx))
+    
+    # Sort by angle
+    if direction == 'clockwise':
+        coord_angles.sort(key=lambda x: x[0])
+    else:  # anticlockwise
+        coord_angles.sort(key=lambda x: x[0], reverse=True)
+    
+    # Initialize all LEDs to off color
+    cols = [color_off] * NUM_LEDS
+    yield cols
+    time.sleep(delay)
+    
+    # Activate LEDs in order
+    for angle, coord, led_idx in coord_angles:
+        if led_idx < NUM_LEDS:
+            cols[led_idx] = color_on
+        yield cols
+        time.sleep(delay)
+
+def _pattern_circular(direction, color_on=(0,0,255,40), color_off=(0,0,0,0), delay=0.05):
+    """
+    Generate frames for circular patterns (outward/inward).
+    
+    :param direction: 'outward' or 'inward'
+    :param color_on: Color tuple (b,g,r,br) for activated LEDs (default: blue)
+    :param color_off: Color tuple (b,g,r,br) for deactivated LEDs
+    :param delay: Delay between steps in seconds
+    """
+    if not _coord_map:
+        return
+    
+    # Calculate center of the playfield
+    x_values = [coord[0] for coord in _coord_map.keys()]
+    y_values = [coord[1] for coord in _coord_map.keys()]
+    
+    if not x_values or not y_values:
+        return
+    
+    center_x = (min(x_values) + max(x_values)) / 2.0
+    center_y = (min(y_values) + max(y_values)) / 2.0
+    
+    # Calculate distances from center for all coordinates
+    coord_distances = []
+    for coord, led_idx in _coord_map.items():
+        dx = coord[0] - center_x
+        dy = coord[1] - center_y
+        distance = math.hypot(dx, dy)
+        coord_distances.append((distance, coord, led_idx))
+    
+    # Sort by distance
+    if direction == 'outward':
+        coord_distances.sort(key=lambda x: x[0])
+    else:  # inward
+        coord_distances.sort(key=lambda x: x[0], reverse=True)
+    
+    # Initialize all LEDs to off color
+    cols = [color_off] * NUM_LEDS
+    yield cols
+    time.sleep(delay)
+    
+    # Group by distance and activate in steps
+    current_distance = None
+    for distance, coord, led_idx in coord_distances:
+        # Round distance to group nearby LEDs
+        rounded_distance = round(distance, 1)
+        if current_distance != rounded_distance:
+            current_distance = rounded_distance
+            yield cols
+            time.sleep(delay)
+        if led_idx < NUM_LEDS:
+            cols[led_idx] = color_on
+    
+    # Yield final frame with all LEDs activated
+    yield cols
+
 # ---------- event animations ----------
 def anim_menu_pulse(ser, accent=None, seconds=2.0):
     base = accent if accent else default_menu_color()
@@ -200,24 +416,52 @@ def idle_menu(accent=None):
         yield breath_frame(time.monotonic()-t0, color=base, speed=0.8, minf=0.2, maxf=0.8)
 
 def idle_attract(mode="breath"):
-    t0=time.monotonic()
-    if mode == "rainbow":
+    """
+    Generator for attract mode patterns.
+    If YAML pattern queue is available, cycles through configured patterns.
+    Otherwise, falls back to hardcoded breath or rainbow modes.
+    """
+    # Try to use YAML-configured patterns if available
+    if _pattern_queue and _coord_map:
+        pattern_funcs = {
+            'linear': _pattern_linear,
+            'radial': _pattern_radial,
+            'circular': _pattern_circular,
+        }
+        
+        pattern_idx = 0
         while True:
-            t=time.monotonic()-t0; cols=[]
-            for i in range(NUM_LEDS):
-                hue = (t*0.05 + i/NUM_LEDS) % 1.0
-                h6 = hue*6.0; k=int(h6); f=h6-k; v=24; p=0; q=int(v*(1.0-f)); tt=int(v*f)
-                if   k==0: rgb=(v,tt,p)
-                elif k==1: rgb=(q,v,p)
-                elif k==2: rgb=(p,v,tt)
-                elif k==3: rgb=(p,q,v)
-                elif k==4: rgb=(tt,p,v)
-                else:      rgb=(v,p,q)
-                cols.append((rgb[0], rgb[1], rgb[2], 20))
-            yield cols
+            pattern_name, params = _pattern_queue[pattern_idx]
+            pattern_func = pattern_funcs.get(pattern_name)
+            
+            if pattern_func:
+                # Generate frames from this pattern
+                for cols in pattern_func(**params):
+                    yield cols
+            
+            # Move to next pattern
+            pattern_idx = (pattern_idx + 1) % len(_pattern_queue)
+    
+    # Fallback to original hardcoded modes
     else:
-        while True:
-            yield breath_frame(time.monotonic()-t0, color=(0,0,0,28), speed=0.6, minf=0.15, maxf=0.6)
+        t0=time.monotonic()
+        if mode == "rainbow":
+            while True:
+                t=time.monotonic()-t0; cols=[]
+                for i in range(NUM_LEDS):
+                    hue = (t*0.05 + i/NUM_LEDS) % 1.0
+                    h6 = hue*6.0; k=int(h6); f=h6-k; v=24; p=0; q=int(v*(1.0-f)); tt=int(v*f)
+                    if   k==0: rgb=(v,tt,p)
+                    elif k==1: rgb=(q,v,p)
+                    elif k==2: rgb=(p,v,tt)
+                    elif k==3: rgb=(p,q,v)
+                    elif k==4: rgb=(tt,p,v)
+                    else:      rgb=(v,p,q)
+                    cols.append((rgb[0], rgb[1], rgb[2], 20))
+                yield cols
+        else:
+            while True:
+                yield breath_frame(time.monotonic()-t0, color=(0,0,0,28), speed=0.6, minf=0.15, maxf=0.6)
 
 # ---------- FIFO helpers ----------
 def ensure_fifo(path=FIFO_PATH):
@@ -281,6 +525,7 @@ def find_serial_port():
 # ---------- Main ----------
 def main():
     load_config()
+    load_buttons_config()
     ensure_fifo()
 
     port = find_serial_port()
@@ -316,6 +561,7 @@ def main():
 
                         if name == "reload-config":
                             load_config()
+                            load_buttons_config()
 
                         else:
                             syskey = get_system_key(evt)
@@ -375,5 +621,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-PY
-chmod +x /recalbox/share/pixel-multiverse/pm_daemon.py
+

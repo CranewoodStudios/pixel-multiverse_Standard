@@ -73,12 +73,25 @@ Maps physical LED positions (x, y coordinates) to LED indices:
 3. **circular** - Expanding/contracting patterns from center
    - Directions: `outward`, `inward`
 
+4. **sequential_colors** - Sequential color cycling pattern (Picade Max startup sequence)
+   - Each LED flashes through: Red → Green → Blue → White
+   - After all LEDs complete, fades all to off
+   - Pattern then loops continuously
+
 ### Pattern Parameters
 
+#### Common Parameters (linear, radial, circular)
 - `direction`: Pattern direction (see above for each type)
 - `color_on`: BGRBR tuple `[blue, green, red, brightness]` (0-255 each)
 - `color_off`: BGRBR tuple for "off" state (optional, defaults to black)
 - `delay`: Time in seconds between animation steps
+
+#### Sequential Colors Parameters
+- `num_leds`: Number of LEDs to animate (default: 7)
+- `dwell_ms`: Milliseconds each color stays on per LED (default: 500)
+- `fade_steps`: Number of fade steps for fade-out (default: 60)
+- `fade_ms`: Milliseconds per fade step (default: 20)
+- `brightness`: Maximum brightness level 0-255 (default: 255)
 
 ### Example Patterns
 
@@ -109,6 +122,16 @@ Maps physical LED positions (x, y coordinates) to LED indices:
       "color_on": [255, 0, 255, 40],
       "color_off": [0, 0, 0, 0],
       "delay": 0.05
+    }
+  },
+  {
+    "pattern": "sequential_colors",
+    "params": {
+      "num_leds": 7,
+      "dwell_ms": 500,
+      "fade_steps": 60,
+      "fade_ms": 20,
+      "brightness": 255
     }
   }
 ]

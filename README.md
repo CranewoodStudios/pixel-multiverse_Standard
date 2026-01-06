@@ -130,13 +130,24 @@ The attract mode supports several built-in patterns with directions:
 - `'circular'`
   - `'outward'`
   - `'inward'`
+- `'sequential_colors'`
+  - No direction parameter needed
+  - Each LED cycles through Red → Green → Blue → White
+  - After all LEDs complete, fades all to off and loops
 
 Each pattern method accepts parameters:
 
-- `direction`: a diretion tht is valid for the pattern
-- `color_on`: The color to set LEDs to during activation.
-- `color_off`: The color to set LEDs to during reset (default is off).
-- `delay`: Delay between steps in the pattern (controls speed).
+- `direction`: a direction that is valid for the pattern (not used for sequential_colors)
+- `color_on`: The color to set LEDs to during activation (not used for sequential_colors).
+- `color_off`: The color to set LEDs to during reset (default is off) (not used for sequential_colors).
+- `delay`: Delay between steps in the pattern (controls speed) (not used for sequential_colors).
+
+For `sequential_colors`, the parameters are:
+- `num_leds`: Number of LEDs to animate
+- `dwell_ms`: Milliseconds each color stays on per LED
+- `fade_steps`: Number of fade steps for fade-out
+- `fade_ms`: Milliseconds per fade step
+- `brightness`: Maximum brightness level 0-255
 
 #### **Additional Features:**
 

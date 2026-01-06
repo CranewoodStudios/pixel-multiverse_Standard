@@ -408,10 +408,10 @@ def idle_menu(accent=None):
 def idle_attract(mode="breath"):
     """
     Generator for attract mode patterns.
-    If YAML pattern queue is available, cycles through configured patterns.
+    If JSON pattern queue is available, cycles through configured patterns.
     Otherwise, falls back to hardcoded breath or rainbow modes.
     """
-    # Try to use YAML-configured patterns if available
+    # Try to use JSON-configured patterns if available
     if _pattern_queue and _coord_map:
         pattern_funcs = {
             'linear': _pattern_linear,

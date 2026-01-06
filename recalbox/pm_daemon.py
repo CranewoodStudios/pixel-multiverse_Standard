@@ -5,13 +5,6 @@
 
 import os, sys, time, json, math, signal, select
 
-# Try to import yaml for button configuration
-try:
-    import yaml
-    YAML_AVAILABLE = True
-except ImportError:
-    YAML_AVAILABLE = False
-
 # ---------- CONFIG ----------
 NUM_LEDS = 7
 ORDER = list(range(NUM_LEDS))      # change if your physical order differs
@@ -19,7 +12,7 @@ BRIGHT_LIMIT = 170                 # cap brightness (0..255)
 FPS = 60
 FIFO_PATH = "/tmp/pm.fifo"
 SYSTEMS_JSON = "/recalbox/share/pixel-multiverse/systems.json"
-BUTTONS_YAML = "/recalbox/share/pixel-multiverse/buttons.yml"
+BUTTONS_JSON = "/recalbox/share/pixel-multiverse/buttons.json"
 ES_STATE = "/tmp/es_state.inf"
 HEADER = b"multiverse:data"
 # --------------------------------
@@ -87,14 +80,11 @@ def load_config():
         _cfg = {}
 
 def load_buttons_config():
-    """Load button configuration from YAML file."""
+    """Load button configuration from JSON file."""
     global _buttons_cfg, _coord_map, _pattern_queue, NUM_LEDS
-    if not YAML_AVAILABLE:
-        log("yaml not available, skipping buttons config")
-        return
     try:
-        with open(BUTTONS_YAML, "r") as f:
-            _buttons_cfg = yaml.safe_load(f)
+        with open(BUTTONS_JSON, "r") as f:
+            _buttons_cfg = json.load(f)
         btn_cfg = _buttons_cfg.get("buttons", {})
         
         # Update NUM_LEDS from config if specified
@@ -118,11 +108,11 @@ def load_buttons_config():
             if pattern and params:
                 _pattern_queue.append((pattern, params))
         
-        log("loaded buttons.yml:", f"{len(_coord_map)} LEDs mapped, {len(_pattern_queue)} patterns")
+        log("loaded buttons.json:", f"{len(_coord_map)} LEDs mapped, {len(_pattern_queue)} patterns")
     except FileNotFoundError:
-        log("buttons.yml not found at", BUTTONS_YAML)
+        log("buttons.json not found at", BUTTONS_JSON)
     except Exception as e:
-        log("buttons.yml not loaded:", e)
+        log("buttons.json not loaded:", e)
 
 def get_system_key(evt):
     sysid = (evt.get("system") or "").lower()
@@ -418,10 +408,10 @@ def idle_menu(accent=None):
 def idle_attract(mode="breath"):
     """
     Generator for attract mode patterns.
-    If YAML pattern queue is available, cycles through configured patterns.
+    If JSON pattern queue is available, cycles through configured patterns.
     Otherwise, falls back to hardcoded breath or rainbow modes.
     """
-    # Try to use YAML-configured patterns if available
+    # Try to use JSON-configured patterns if available
     if _pattern_queue and _coord_map:
         pattern_funcs = {
             'linear': _pattern_linear,

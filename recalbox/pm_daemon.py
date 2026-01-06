@@ -396,7 +396,7 @@ def _pattern_sequential_colors(num_leds=7, dwell_ms=500, fade_steps=60, fade_ms=
         # Cycle through each color for this LED
         for color in colors:
             cols[led_idx] = color
-            yield cols
+            yield list(cols)  # Yield a copy, not the same list object
             time.sleep(dwell_sec)
     
     # After all LEDs complete, fade all to off

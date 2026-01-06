@@ -3,18 +3,26 @@
 # Reads JSON lines from /tmp/pm.fifo and drives Plasma 2040 bridge:
 #   frame = b"multiverse:data" + N*(B,G,R,br)
 
-import os, sys, time, json, math, signal, select
+import os
+import sys
+import time
+import json
+import math
+import signal
+import select
+import stat
 
 # ---------- CONFIG ----------
+CONFIG_JSON = "/recalbox/share/pixel-multiverse/config.json"
+HEADER = b"multiverse:data"
+
+# These will be loaded from config.json
 NUM_LEDS = 7
-ORDER = list(range(NUM_LEDS))      # change if your physical order differs
-BRIGHT_LIMIT = 170                 # cap brightness (0..255)
+ORDER = list(range(NUM_LEDS))
+BRIGHT_LIMIT = 170
 FPS = 60
 FIFO_PATH = "/tmp/pm.fifo"
-SYSTEMS_JSON = "/recalbox/share/pixel-multiverse/systems.json"
-BUTTONS_JSON = "/recalbox/share/pixel-multiverse/buttons.json"
 ES_STATE = "/tmp/es_state.inf"
-HEADER = b"multiverse:data"
 # --------------------------------
 
 # pyserial (installed via pip --target /recalbox/share/pythonlibs)
@@ -63,35 +71,75 @@ def read_es_state(path=ES_STATE):
         pass
     return out
 
-# ---------- systems.json ----------
+# ---------- CONFIG LOADING ----------
 _cfg = {}
-_buttons_cfg = {}
 _coord_map = {}
 _pattern_queue = []
 
-def load_config():
-    global _cfg
-    try:
-        with open(SYSTEMS_JSON, "r") as f:
-            _cfg = json.load(f)
-        log("loaded systems.json:", ",".join(sorted(_cfg.keys())))
-    except Exception as e:
-        log("systems.json not loaded:", e)
-        _cfg = {}
+def parse_color_dict(c):
+    """Parse color from dict format: {"r": 255, "g": 0, "b": 0, "br": 36}"""
+    if not isinstance(c, dict):
+        raise ValueError(f"Expected dict, got {type(c)}")
+    b = int(c.get("b", 0))
+    g = int(c.get("g", 0))
+    r = int(c.get("r", 0))
+    br = _clamp(min(int(c.get("br", 24)), BRIGHT_LIMIT))
+    return (b, g, r, br)
 
-def load_buttons_config():
-    """Load button configuration from JSON file."""
-    global _buttons_cfg, _coord_map, _pattern_queue, NUM_LEDS
+def parse_color_string(s):
+    """Parse color from string format: "#ff0000:100" """
+    if not isinstance(s, str):
+        raise ValueError(f"Expected string, got {type(s)}")
+    s = s.strip()
+    br = 64
+    if ":" in s:
+        s, brs = s.split(":", 1)
+        br = int(brs)
+    if not (s.startswith("#") and len(s) == 7):
+        raise ValueError(f"Invalid color string format: {s}")
+    r = int(s[1:3], 16)
+    g = int(s[3:5], 16)
+    b = int(s[5:7], 16)
+    return (b, g, r, _clamp(min(br, BRIGHT_LIMIT)))
+
+def parse_color_tuple(t):
+    """Parse color from tuple/list format: [0, 0, 255, 40]"""
+    if not isinstance(t, (list, tuple)) or len(t) < 3:
+        raise ValueError(f"Expected list/tuple with at least 3 elements, got {t}")
+    b = int(t[0])
+    g = int(t[1])
+    r = int(t[2])
+    br = int(t[3]) if len(t) > 3 else 24
+    return (b, g, r, _clamp(min(br, BRIGHT_LIMIT)))
+
+def load_config():
+    """Load unified configuration from config.json"""
+    global _cfg, _coord_map, _pattern_queue, NUM_LEDS, ORDER, BRIGHT_LIMIT, FPS, FIFO_PATH, ES_STATE
+    
     try:
-        with open(BUTTONS_JSON, "r") as f:
-            _buttons_cfg = json.load(f)
-        btn_cfg = _buttons_cfg.get("buttons", {})
+        with open(CONFIG_JSON, "r") as f:
+            _cfg = json.load(f)
         
-        # Update NUM_LEDS from config if specified
-        if btn_cfg.get("enabled") and btn_cfg.get("num_leds"):
-            NUM_LEDS = btn_cfg["num_leds"]
+        # Load hardware settings
+        hw = _cfg.get("hardware", {})
+        if "num_leds" in hw:
+            NUM_LEDS = hw["num_leds"]
+        if "led_order" in hw:
+            ORDER = hw["led_order"]
+        if "brightness_limit" in hw:
+            BRIGHT_LIMIT = hw["brightness_limit"]
+        if "fps" in hw:
+            FPS = hw["fps"]
         
-        # Parse led_map to create coord_map
+        # Load paths
+        paths = _cfg.get("paths", {})
+        if "fifo" in paths:
+            FIFO_PATH = paths["fifo"]
+        if "es_state" in paths:
+            ES_STATE = paths["es_state"]
+        
+        # Load button configuration
+        btn_cfg = _cfg.get("buttons", {})
         led_map = btn_cfg.get("led_map", [])
         _coord_map = {}
         for item in led_map:
@@ -100,7 +148,7 @@ def load_buttons_config():
             if coord and value is not None:
                 _coord_map[coord] = value
         
-        # Parse attract_program to create pattern_queue
+        # Load attract program
         _pattern_queue = []
         for pattern_cfg in btn_cfg.get("attract_program", []):
             pattern = pattern_cfg.get("pattern")
@@ -108,11 +156,12 @@ def load_buttons_config():
             if pattern and params:
                 _pattern_queue.append((pattern, params))
         
-        log("loaded buttons.json:", f"{len(_coord_map)} LEDs mapped, {len(_pattern_queue)} patterns")
+        systems = _cfg.get("systems", {})
+        log(f"loaded config.json: {len(systems)} systems, {len(_coord_map)} LEDs mapped, {len(_pattern_queue)} patterns")
     except FileNotFoundError:
-        log("buttons.json not found at", BUTTONS_JSON)
+        raise FileNotFoundError(f"Configuration file not found: {CONFIG_JSON}")
     except Exception as e:
-        log("buttons.json not loaded:", e)
+        raise Exception(f"Failed to load configuration: {e}")
 
 def get_system_key(evt):
     sysid = (evt.get("system") or "").lower()
@@ -127,76 +176,87 @@ def get_rom_key(evt):
     base = os.path.basename(rp); name,_ = os.path.splitext(base)
     return name
 
-# ---------- frames ----------
+# ---------- ANIMATION HELPERS ----------
 def breath_frame(t, color=(0,0,255,40), speed=1.2, minf=0.2, maxf=1.0):
     bb,bg,br,bbr = color
     f = (math.sin(t*speed)+1.0)/2.0
     f = minf + (maxf-minf)*f
     return [(bb,bg,br,_clamp(int(bbr*f))) for _ in range(NUM_LEDS)]
 
-def wipe_frames(color=(0,64,64,BRIGHT_LIMIT), step_ms=50):
+def _wipe_frames(color=(0,64,64,BRIGHT_LIMIT), step_ms=50):
     for i in range(NUM_LEDS):
         cols = all_off()
         for k in range(i+1): cols[k] = color
         yield cols; time.sleep(step_ms/1000)
 
-def fade_all(from_lvl=40, to_lvl=0, ms_total=700):
+def _fade_all(from_lvl=40, to_lvl=0, ms_total=700):
     steps = max(1, int(ms_total/20))
     for s in range(steps+1):
         lvl = _clamp(int(lerp(from_lvl, to_lvl, s/steps)))
         yield solid(0,0,0,lvl); time.sleep(0.02)
 
-# ---------- layouts from config ----------
+# ---------- SYSTEM CONFIGURATION ----------
 def cols_from_layout(layout):
-    cols=[]
+    """Convert layout configuration to color tuples"""
+    cols = []
     for i in range(min(NUM_LEDS, len(layout))):
         item = layout[i]
-        if isinstance(item, dict):
-            r=int(item.get("r",0)); g=int(item.get("g",0)); b=int(item.get("b",0)); br=int(item.get("br",0))
-            cols.append((b,g,r,_clamp(min(br,BRIGHT_LIMIT))))
-        elif isinstance(item, str):
-            s=item.strip(); br=64
-            if ":" in s:
-                s,brs = s.split(":",1)
-                try: br=int(brs)
-                except: br=64
-            if s.startswith("#") and len(s)==7:
-                r=int(s[1:3],16); g=int(s[3:5],16); b=int(s[5:7],16)
-                cols.append((b,g,r,_clamp(min(br,BRIGHT_LIMIT))))
+        try:
+            if isinstance(item, dict):
+                cols.append(parse_color_dict(item))
+            elif isinstance(item, str):
+                cols.append(parse_color_string(item))
+            elif isinstance(item, (list, tuple)):
+                cols.append(parse_color_tuple(item))
             else:
-                cols.append((0,0,0,0))
-        else:
-            cols.append((0,0,0,0))
-    while len(cols) < NUM_LEDS: cols.append((0,0,0,0))
+                cols.append((0, 0, 0, 0))
+        except (ValueError, KeyError, IndexError):
+            cols.append((0, 0, 0, 0))
+    while len(cols) < NUM_LEDS:
+        cols.append((0, 0, 0, 0))
     return cols
 
 def lookup_start_layout(system_key, rom_key):
-    syscfg = _cfg.get(system_key or "", {})
+    """Look up start layout for system/rom, returns None if not found"""
+    systems = _cfg.get("systems", {})
+    syscfg = systems.get(system_key or "", {})
     if syscfg and "rom_overrides" in syscfg:
         ro = syscfg["rom_overrides"].get(rom_key or "", None)
-        if ro and "start_layout" in ro: return cols_from_layout(ro["start_layout"])
-    if syscfg and "start_layout" in syscfg: return cols_from_layout(syscfg["start_layout"])
+        if ro and "start_layout" in ro:
+            return cols_from_layout(ro["start_layout"])
+    if syscfg and "start_layout" in syscfg:
+        return cols_from_layout(syscfg["start_layout"])
     return None
 
 def system_accent(system_key):
-    syscfg = _cfg.get(system_key or "", {})
+    """Get system accent color, returns None if not found"""
+    systems = _cfg.get("systems", {})
+    syscfg = systems.get(system_key or "", {})
     c = syscfg.get("accent")
-    if isinstance(c, dict):
-        b=int(c.get("b",0)); g=int(c.get("g",0)); r=int(c.get("r",0)); br=_clamp(min(int(c.get("br",24)),BRIGHT_LIMIT))
-        return (b,g,r,br)
+    if c:
+        try:
+            return parse_color_dict(c)
+        except (ValueError, KeyError):
+            pass
     return None
 
 def default_menu_color():
-    d=_cfg.get("defaults",{}); c=d.get("menu_color")
-    if isinstance(c, dict):
-        b=int(c.get("b",0)); g=int(c.get("g",0)); r=int(c.get("r",0)); br=_clamp(min(int(c.get("br",24)),BRIGHT_LIMIT))
-        return (b,g,r,br)
-    return (0,32,64,28)
+    """Get default menu color from configuration"""
+    d = _cfg.get("defaults", {})
+    c = d.get("menu_color")
+    if not c:
+        raise ValueError("menu_color not found in defaults configuration")
+    return parse_color_dict(c)
 
 def default_attract_mode():
-    d=_cfg.get("defaults",{}); return (d.get("attract") or "breath").lower()
+    """Get default attract mode from configuration"""
+    d = _cfg.get("defaults", {})
+    mode = d.get("attract_mode")
+    if not mode:
+        raise ValueError("attract_mode not found in defaults configuration")
+    return mode.lower()
 
-# ---------- pattern generation functions ----------
+# ---------- ATTRACT PATTERN GENERATORS ----------
 def _pattern_linear(direction, color_on=(0,0,255,40), color_off=(0,0,0,0), delay=0.05):
     """
     Generate frames for linear patterns.
@@ -419,7 +479,7 @@ def _pattern_sequential_colors(num_leds=7, dwell_ms=500, fade_steps=60, fade_ms=
         yield faded_cols
         time.sleep(fade_sec)
 
-# ---------- event animations ----------
+# ---------- EVENT ANIMATIONS ----------
 def anim_menu_pulse(ser, accent=None, seconds=2.0):
     base = accent if accent else default_menu_color()
     t0=time.monotonic()
@@ -428,27 +488,34 @@ def anim_menu_pulse(ser, accent=None, seconds=2.0):
         send_colors(ser, cols); time.sleep(1.0/FPS)
 
 def anim_game_start(ser, system_key=None, rom_key=None):
+    """Animate game start with system-specific layout or accent color"""
     layout = lookup_start_layout(system_key, rom_key)
     if layout:
-        send_colors(ser, layout); time.sleep(1.0); return
-    accent = system_accent(system_key) or (0,64,0,BRIGHT_LIMIT)
-    for cols in wipe_frames(color=accent, step_ms=40): send_colors(ser, cols)
-    send_colors(ser, solid(0,0,0,18)); time.sleep(0.25)
+        send_colors(ser, layout)
+        time.sleep(1.0)
+        return
+    accent = system_accent(system_key)
+    if not accent:
+        raise ValueError(f"No accent color configured for system: {system_key}")
+    for cols in _wipe_frames(color=accent, step_ms=40):
+        send_colors(ser, cols)
+    send_colors(ser, solid(0, 0, 0, 18))
+    time.sleep(0.25)
 
 def anim_game_end(ser):
-    for cols in wipe_frames(color=(64,0,0,BRIGHT_LIMIT), step_ms=40): send_colors(ser, cols)
-    for cols in fade_all(from_lvl=28, to_lvl=10, ms_total=600): send_colors(ser, cols)
+    for cols in _wipe_frames(color=(64,0,0,BRIGHT_LIMIT), step_ms=40): send_colors(ser, cols)
+    for cols in _fade_all(from_lvl=28, to_lvl=10, ms_total=600): send_colors(ser, cols)
 
 def anim_shutdown(ser):
     for _ in range(3):
         send_colors(ser, solid(0,0,0,BRIGHT_LIMIT)); time.sleep(0.08)
         send_colors(ser, solid(0,0,0,8)); time.sleep(0.1)
-    for cols in fade_all(from_lvl=24, to_lvl=0, ms_total=900): send_colors(ser, cols)
+    for cols in _fade_all(from_lvl=24, to_lvl=0, ms_total=900): send_colors(ser, cols)
 
 def anim_reboot(ser):
-    for cols in wipe_frames(color=(0,64,0,BRIGHT_LIMIT), step_ms=35): send_colors(ser, cols)
-    for cols in wipe_frames(color=(64,0,0,BRIGHT_LIMIT), step_ms=35): send_colors(ser, cols)
-    for cols in fade_all(from_lvl=28, to_lvl=0, ms_total=500): send_colors(ser, cols)
+    for cols in _wipe_frames(color=(0,64,0,BRIGHT_LIMIT), step_ms=35): send_colors(ser, cols)
+    for cols in _wipe_frames(color=(64,0,0,BRIGHT_LIMIT), step_ms=35): send_colors(ser, cols)
+    for cols in _fade_all(from_lvl=28, to_lvl=0, ms_total=500): send_colors(ser, cols)
 
 def anim_settings_changed(ser):
     col=(32,32,0,BRIGHT_LIMIT)
@@ -456,60 +523,41 @@ def anim_settings_changed(ser):
         send_colors(ser, solid(*col)); time.sleep(0.12)
         send_colors(ser, all_off());   time.sleep(0.08)
 
-def idle_menu(accent=None):
+# ---------- FRAME GENERATORS ----------
+def idle_menu_generator(accent=None):
+    """Generator for idle menu breathing animation"""
     base = accent if accent else default_menu_color()
     t0=time.monotonic()
     while True:
         yield breath_frame(time.monotonic()-t0, color=base, speed=0.8, minf=0.2, maxf=0.8)
 
-def idle_attract(mode="breath"):
+def idle_attract_generator(mode=None):
     """
     Generator for attract mode patterns.
-    If JSON pattern queue is available, cycles through configured patterns.
-    Otherwise, falls back to hardcoded breath or rainbow modes.
+    Uses configured patterns from attract_program.
     """
-    # Try to use JSON-configured patterns if available
-    if _pattern_queue:
-        pattern_funcs = {
-            'linear': _pattern_linear,
-            'radial': _pattern_radial,
-            'circular': _pattern_circular,
-            'sequential_colors': _pattern_sequential_colors,
-        }
-        
-        pattern_idx = 0
-        while True:
-            pattern_name, params = _pattern_queue[pattern_idx]
-            pattern_func = pattern_funcs.get(pattern_name)
-            
-            if pattern_func:
-                # Generate frames from this pattern
-                for cols in pattern_func(**params):
-                    yield cols
-            
-            # Move to next pattern
-            pattern_idx = (pattern_idx + 1) % len(_pattern_queue)
+    if not _pattern_queue:
+        raise ValueError("No attract program configured")
     
-    # Fallback to original hardcoded modes
-    else:
-        t0=time.monotonic()
-        if mode == "rainbow":
-            while True:
-                t=time.monotonic()-t0; cols=[]
-                for i in range(NUM_LEDS):
-                    hue = (t*0.05 + i/NUM_LEDS) % 1.0
-                    h6 = hue*6.0; k=int(h6); f=h6-k; v=24; p=0; q=int(v*(1.0-f)); tt=int(v*f)
-                    if   k==0: rgb=(v,tt,p)
-                    elif k==1: rgb=(q,v,p)
-                    elif k==2: rgb=(p,v,tt)
-                    elif k==3: rgb=(p,q,v)
-                    elif k==4: rgb=(tt,p,v)
-                    else:      rgb=(v,p,q)
-                    cols.append((rgb[0], rgb[1], rgb[2], 20))
+    pattern_funcs = {
+        'linear': _pattern_linear,
+        'radial': _pattern_radial,
+        'circular': _pattern_circular,
+        'sequential_colors': _pattern_sequential_colors,
+    }
+    
+    pattern_idx = 0
+    while True:
+        pattern_name, params = _pattern_queue[pattern_idx]
+        pattern_func = pattern_funcs.get(pattern_name)
+        
+        if pattern_func:
+            # Generate frames from this pattern
+            for cols in pattern_func(**params):
                 yield cols
-        else:
-            while True:
-                yield breath_frame(time.monotonic()-t0, color=(0,0,0,28), speed=0.6, minf=0.15, maxf=0.6)
+        
+        # Move to next pattern
+        pattern_idx = (pattern_idx + 1) % len(_pattern_queue)
 
 # ---------- FIFO helpers ----------
 def ensure_fifo(path=FIFO_PATH):
@@ -525,7 +573,6 @@ def ensure_fifo(path=FIFO_PATH):
 
 def stat_is_fifo(path):
     try:
-        import stat
         m = os.stat(path).st_mode
         return stat.S_ISFIFO(m)
     except Exception:
@@ -573,7 +620,6 @@ def find_serial_port():
 # ---------- Main ----------
 def main():
     load_config()
-    load_buttons_config()
     ensure_fifo()
 
     port = find_serial_port()
@@ -583,7 +629,7 @@ def main():
     ser = serial.Serial(port, 115200, timeout=0.05)
     log("daemon started; PORT =", port, "FIFO =", FIFO_PATH)
 
-    current_idle = idle_menu()
+    current_idle = idle_menu_generator()
     last_idle = 0.0
 
     rdr, dummy_w = open_fifo_reader()
@@ -609,7 +655,6 @@ def main():
 
                         if name == "reload-config":
                             load_config()
-                            load_buttons_config()
 
                         else:
                             syskey = get_system_key(evt)
@@ -618,15 +663,15 @@ def main():
                             if name == "menu":
                                 accent = system_accent(syskey)
                                 anim_menu_pulse(ser, accent=accent, seconds=2.0)
-                                current_idle = idle_menu(accent=accent)
+                                current_idle = idle_menu_generator(accent=accent)
 
                             elif name == "game-start":
                                 anim_game_start(ser, system_key=syskey, rom_key=romkey)
-                                current_idle = idle_menu(accent=system_accent(syskey))
+                                current_idle = idle_menu_generator(accent=system_accent(syskey))
 
                             elif name == "game-end":
                                 anim_game_end(ser)
-                                current_idle = idle_menu(accent=system_accent(syskey))
+                                current_idle = idle_menu_generator(accent=system_accent(syskey))
 
                             elif name == "shutdown":
                                 anim_shutdown(ser)
@@ -638,10 +683,10 @@ def main():
                                 anim_settings_changed(ser)
 
                             elif name == "attract-on":
-                                current_idle = idle_attract(mode=default_attract_mode())
+                                current_idle = idle_attract_generator()
 
                             elif name == "attract-off":
-                                current_idle = idle_menu(accent=system_accent(syskey))
+                                current_idle = idle_menu_generator(accent=system_accent(syskey))
 
                             elif name == "solid":
                                 b=int(evt.get("b",0)); g=int(evt.get("g",0)); r=int(evt.get("r",0)); br=int(evt.get("br",24))
@@ -655,7 +700,7 @@ def main():
             if time.monotonic() - last_idle >= (1.0/30.0):
                 try: cols = next(current_idle)
                 except StopIteration:
-                    current_idle = idle_menu(); cols = next(current_idle)
+                    current_idle = idle_menu_generator(); cols = next(current_idle)
                 send_colors(ser, cols); last_idle = time.monotonic()
 
     finally:

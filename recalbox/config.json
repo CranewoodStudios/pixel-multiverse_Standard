@@ -1,0 +1,155 @@
+{
+  "hardware": {
+    "num_leds": 7,
+    "led_order": [0, 1, 2, 3, 4, 5, 6],
+    "brightness_limit": 170,
+    "fps": 60
+  },
+  "paths": {
+    "fifo": "/tmp/pm.fifo",
+    "es_state": "/tmp/es_state.inf"
+  },
+  "buttons": {
+    "enabled": true,
+    "led_map": [
+      {
+        "coord": [0, 0],
+        "value": 0
+      },
+      {
+        "coord": [1, 0],
+        "value": 1
+      },
+      {
+        "coord": [2, 0],
+        "value": 2
+      },
+      {
+        "coord": [2, 1],
+        "value": 3
+      },
+      {
+        "coord": [1, 1],
+        "value": 4
+      },
+      {
+        "coord": [0, 1],
+        "value": 5
+      },
+      {
+        "coord": [0, 2],
+        "value": 6
+      }
+    ],
+    "attract_program": [
+      {
+        "pattern": "linear",
+        "params": {
+          "direction": "left_to_right",
+          "color_on": [0, 0, 255, 40],
+          "color_off": [0, 0, 0, 0],
+          "delay": 0.05
+        }
+      },
+      {
+        "pattern": "linear",
+        "params": {
+          "direction": "right_to_left",
+          "color_on": [255, 0, 0, 40],
+          "color_off": [0, 0, 0, 0],
+          "delay": 0.05
+        }
+      },
+      {
+        "pattern": "linear",
+        "params": {
+          "direction": "top_to_bottom",
+          "color_on": [0, 255, 0, 40],
+          "color_off": [0, 0, 0, 0],
+          "delay": 0.05
+        }
+      },
+      {
+        "pattern": "linear",
+        "params": {
+          "direction": "bottom_to_top",
+          "color_on": [255, 255, 0, 40],
+          "color_off": [0, 0, 0, 0],
+          "delay": 0.05
+        }
+      },
+      {
+        "pattern": "radial",
+        "params": {
+          "direction": "clockwise",
+          "color_on": [0, 255, 255, 40],
+          "color_off": [0, 0, 0, 0],
+          "delay": 0.05
+        }
+      },
+      {
+        "pattern": "radial",
+        "params": {
+          "direction": "anticlockwise",
+          "color_on": [255, 0, 255, 40],
+          "color_off": [0, 0, 0, 0],
+          "delay": 0.05
+        }
+      },
+      {
+        "pattern": "circular",
+        "params": {
+          "direction": "outward",
+          "color_on": [128, 128, 128, 40],
+          "color_off": [0, 0, 0, 0],
+          "delay": 0.05
+        }
+      },
+      {
+        "pattern": "circular",
+        "params": {
+          "direction": "inward",
+          "color_on": [255, 128, 64, 40],
+          "color_off": [0, 0, 0, 0],
+          "delay": 0.05
+        }
+      },
+      {
+        "pattern": "sequential_colors",
+        "params": {
+          "num_leds": 7,
+          "dwell_ms": 500,
+          "fade_steps": 60,
+          "fade_ms": 20,
+          "brightness": 255
+        }
+      }
+    ]
+  },
+  "defaults": {
+    "menu_color": {"b": 0, "g": 32, "r": 64, "br": 28},
+    "attract_mode": "breath"
+  },
+  "systems": {
+    "snes": {
+      "accent": {"b": 0, "g": 0, "r": 255, "br": 36},
+      "start_layout": [
+        "#ff0000:100",
+        "#ffffff:100",
+        "#ffffff:30",
+        "#ffffff:30",
+        "#ffffff:30",
+        "#ffffff:30",
+        "#ffffff:30"
+      ],
+      "rom_overrides": {
+        "Super Mario World": {
+          "start_layout": ["#00ff00:100","#ffffff:100","#ffffff:30","#ffffff:30","#ffffff:30","#ffffff:30","#ffffff:30"]
+        }
+      }
+    },
+    "nes": {"accent": {"b": 0, "g": 0, "r": 200, "br": 32}},
+    "mame": {"accent": {"b": 0, "g": 64, "r": 64, "br": 32}},
+    "psx": {"accent": {"b": 64, "g": 64, "r": 0, "br": 32}}
+  }
+}

@@ -362,6 +362,63 @@ def _pattern_circular(direction, color_on=(0,0,255,40), color_off=(0,0,0,0), del
     # Yield final frame with all LEDs activated
     yield cols
 
+def _pattern_sequential_colors(num_leds=7, dwell_ms=500, fade_steps=60, fade_ms=20, brightness=255):
+    """
+    Generate frames for sequential color pattern (Picade Max startup sequence).
+    Each LED flashes through Red → Green → Blue → White, then all fade to off.
+    
+    :param num_leds: Number of LEDs to animate (default: 7)
+    :param dwell_ms: Milliseconds each color stays on per LED (default: 500)
+    :param fade_steps: Number of fade steps for fade-out (default: 60)
+    :param fade_ms: Milliseconds per fade step (default: 20)
+    :param brightness: Maximum brightness level 0-255 (default: 255)
+    """
+    # Color sequence: Red, Green, Blue, White
+    # Note: Color format is (B, G, R, brightness)
+    colors = [
+        (0, 0, 255, brightness),      # Red (BGR format)
+        (0, 255, 0, brightness),      # Green
+        (255, 0, 0, brightness),      # Blue
+        (255, 255, 255, brightness),  # White
+    ]
+    
+    dwell_sec = dwell_ms / 1000.0
+    fade_sec = fade_ms / 1000.0
+    
+    # Initialize all LEDs to off
+    cols = [(0, 0, 0, 0)] * NUM_LEDS
+    
+    # Iterate through each LED sequentially
+    for led_idx in range(num_leds):
+        if led_idx >= NUM_LEDS:
+            break
+        
+        # Cycle through each color for this LED
+        for color in colors:
+            cols[led_idx] = color
+            yield cols
+            time.sleep(dwell_sec)
+    
+    # After all LEDs complete, fade all to off
+    # Create a snapshot of the final state
+    final_cols = list(cols)
+    
+    for step in range(fade_steps + 1):
+        fade_factor = 1.0 - (step / fade_steps)
+        faded_cols = []
+        
+        for i in range(NUM_LEDS):
+            if i < num_leds:
+                b, g, r, br = final_cols[i]
+                # Fade brightness proportionally
+                faded_br = int(br * fade_factor)
+                faded_cols.append((b, g, r, _clamp(faded_br)))
+            else:
+                faded_cols.append((0, 0, 0, 0))
+        
+        yield faded_cols
+        time.sleep(fade_sec)
+
 # ---------- event animations ----------
 def anim_menu_pulse(ser, accent=None, seconds=2.0):
     base = accent if accent else default_menu_color()
@@ -412,11 +469,12 @@ def idle_attract(mode="breath"):
     Otherwise, falls back to hardcoded breath or rainbow modes.
     """
     # Try to use JSON-configured patterns if available
-    if _pattern_queue and _coord_map:
+    if _pattern_queue:
         pattern_funcs = {
             'linear': _pattern_linear,
             'radial': _pattern_radial,
             'circular': _pattern_circular,
+            'sequential_colors': _pattern_sequential_colors,
         }
         
         pattern_idx = 0
